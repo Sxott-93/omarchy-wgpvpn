@@ -78,6 +78,10 @@ panel scans automatically when nothing is configured.
 - A polkit agent for the pkexec prompts (same mechanism Omarchy uses for
   tailscale operator authorization).
 
+No custom polkit rule is required: `vpnhelper` has no matching polkit
+policy, so pkexec falls back to standard admin authentication — one
+password prompt per toggle, on any desktop that runs a polkit agent.
+
 ## Development notes
 
 QML files in the plugin directory hot-reload on save, but the running shell
@@ -101,3 +105,7 @@ journalctl --user --since "-30s" | grep -E 'wgpvpn|WARN scene'
 `omarchy plugin remove sxott.wgpvpn` (or delete the directory and rescan).
 State in `~/.local/share/omarchy-wgpvpn/` can be deleted by hand; routes
 applied by an up VPN disappear with the interface on down/reboot.
+
+## License
+
+MIT — see `LICENSE`.

@@ -4,6 +4,7 @@
   "name": "WG VPN",
   "version": "0.1.0",
   "author": "sxott",
+  "license": "MIT",
   "description": "Discover, configure, and toggle WireGuard and AmneziaWG VPNs, with per-VPN extra routes and LAN bypass.",
   "kinds": [
     "bar-widget"
