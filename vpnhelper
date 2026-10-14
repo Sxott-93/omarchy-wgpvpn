@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Root helper for the omarchy wg-VPN plugin. Invoked via pkexec.
+
+  vpnhelper <up|down> <vpns.json> <name>
+
+Brings the named VPN up or down with awg-quick, applying or removing the
+extra routes recorded for it. Routes the plugin applied are written to
+/run/omarchy-wgpvpn/<name>.routes so `down` removes exactly what `up`
+added — including after a reboot, where no routes survive anyway.
+
+Exit status 0 on success; a human-readable message on stderr otherwise.
+"""
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+RUN_DIR = Path("/run/omarchy-wgpvpn")
+AWG_QUICK = "/usr/bin/awg-quick"
+IP = "/usr/bin/ip"
+
+
+def sh(args, check=True):
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True)
+    except OSError as exc:
+        if check:
+            sys.exit(f"cannot run {args[0]}: {exc}")
+        return None
+    if check and proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip()
+        sys.exit(detail if detail else f"{args[0]} {' '.join(args[1:])} failed")
+    return proc
+
+
+def load_vpns(vpns_path):
+    try:
+        return json.loads(Path(vpns_path).read_text())
+    except (OSError, ValueError) as exc:
+        sys.exit(f"cannot read {vpns_path}: {exc}")
+
+
+def vpn_entry(data, name):
+    for vpn in data.get("vpns", []):
+        if vpn.get("name") == name:
+            return vpn
+    sys.exit(f"no VPN named {name}")
+
+
+def all_vpn_names(data):
+    return {str(v.get("name")) for v in data.get("vpns", [])}
+
+
+def link_state(ifname):
+    proc = sh([IP, "-j", "link", "show", "dev", ifname], check=False)
+    if proc is None or proc.returncode != 0:
+        return "absent"
+    try:
+        info = json.loads(proc.stdout)[0]
+    except (ValueError, IndexError):
+        return "absent"
+    flags = [str(f).lower() for f in info.get("flags", [])]
+    return "up" if "up" in flags else "down"
+
+
+def default_devices(exclude):
+    """Default-route devices that are not one of our own VPN interfaces."""
+    proc = sh([IP, "-j", "route", "show", "default"], check=False)
+    devices = []
+    if proc is not None and proc.returncode == 0:
+        try:
+            for entry in json.loads(proc.stdout):
+                dev = str(entry.get("dev", ""))
+                if dev and dev not in exclude and dev not in devices:
+                    devices.append(dev)
+        except ValueError:
+            pass
+    return devices
+
+
+def applied_routes(vpn, bypass_dev):
+    """(cidr, device) pairs: regular routes ride the VPN, bypass routes ride
+    the physical device that held the default route before the VPN came up."""
+    name = str(vpn.get("name"))
+    out = []
+    for route in vpn.get("routes", []) or []:
+        cidr = str(route.get("cidr", "")).strip()
+        if not cidr:
+            continue
+        try:
+            import ipaddress
+            ipaddress.ip_network(cidr, strict=False)
+        except ValueError:
+            continue
+        dev = bypass_dev if route.get("bypass") else name
+        if not dev:
+            continue
+        out.append((cidr, dev))
+    return out
+
+
+def record_path(name):
+    return RUN_DIR / (name + ".routes")
+
+
+def write_record(name, applied):
+    RUN_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    record_path(name).write_text(
+        "".join(f"{cidr}\t{dev}\n" for cidr, dev in applied))
+
+
+def read_record(name):
+    path = record_path(name)
+    if not path.is_file():
+        return []
+    applied = []
+    for line in path.read_text().splitlines():
+        parts = line.split("\t")
+        if len(parts) == 2 and parts[0] and parts[1]:
+            applied.append((parts[0], parts[1]))
+    return applied
+
+
+def do_up(vpns_path, name):
+    data = load_vpns(vpns_path)
+    vpn = vpn_entry(data, name)
+    cfg = str(vpn.get("path", ""))
+    if not cfg or not Path(cfg).is_file():
+        sys.exit(f"config file missing for {name}: {cfg}")
+
+    has_bypass = any(r.get("bypass") for r in vpn.get("routes", []) or [])
+    bypass_dev = ""
+    if has_bypass:
+        devices = default_devices(all_vpn_names(data))
+        if not devices:
+            sys.exit(
+                "a bypass route needs a default route outside the VPNs, "
+                "but the machine has none right now")
+        bypass_dev = devices[0]
+
+    if link_state(name) != "up":
+        sh([AWG_QUICK, "up", cfg])
+
+    applied = applied_routes(vpn, bypass_dev)
+    for cidr, dev in applied:
+        sh([IP, "route", "replace", cidr, "dev", dev], check=False)
+    write_record(name, applied)
+    extra = f", {len(applied)} route(s)" if applied else ""
+    print(f"{name} is up{extra}")
+
+
+def do_down(vpns_path, name):
+    data = load_vpns(vpns_path)
+    vpn = vpn_entry(data, name)
+
+    applied = read_record(name)
+    if not applied:
+        # No record (helper never ran up, or rebooted): recompute so a
+        # manually upped VPN still gets its plugin routes cleaned up.
+        devices = default_devices(all_vpn_names(data))
+        applied = applied_routes(vpn, devices[0] if devices else "")
+
+    for cidr, dev in applied:
+        sh([IP, "route", "del", cidr, "dev", dev], check=False)
+    try:
+        record_path(name).unlink()
+    except OSError:
+        pass
+
+    proc = sh([AWG_QUICK, "down", str(vpn.get("path", ""))], check=False)
+    if proc is not None and proc.returncode != 0 and link_state(name) == "up":
+        detail = (proc.stderr or proc.stdout).strip()
+        sys.exit(detail if detail else "awg-quick down failed")
+    removed = f", {len(applied)} route(s) removed" if applied else ""
+    print(f"{name} is down{removed}")
+
+
+def main():
+    if len(sys.argv) != 4:
+        sys.exit("usage: vpnhelper <up|down> <vpns.json> <name>")
+    cmd, vpns_path, name = sys.argv[1:4]
+    if cmd == "up":
+        do_up(vpns_path, name)
+    elif cmd == "down":
+        do_down(vpns_path, name)
+    else:
+        sys.exit(f"unknown command: {cmd}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Bar icon status for the wg-VPN plugin. Unprivileged.
+
+Prints "up" when any configured VPN's interface is administratively up,
+otherwise "down".
+"""
+import json
+import os
+import subprocess
+from pathlib import Path
+
+
+def main():
+    xdg = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    vpns_path = Path(xdg) / "omarchy-wgpvpn" / "vpns.json"
+    try:
+        data = json.loads(vpns_path.read_text())
+    except (OSError, ValueError):
+        print("down")
+        return
+    for vpn in data.get("vpns", []):
+        name = str(vpn.get("name", ""))
+        if not name:
+            continue
+        try:
+            proc = subprocess.run(
+                ["/usr/bin/ip", "-j", "link", "show", "dev", name],
+                capture_output=True, text=True, timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if proc.returncode != 0:
+            continue
+        try:
+            info = json.loads(proc.stdout)[0]
+        except (ValueError, IndexError):
+            continue
+        if "up" in [str(f).lower() for f in info.get("flags", [])]:
+            print("up")
+            return
+    print("down")
+
+
+if __name__ == "__main__":
+    main()

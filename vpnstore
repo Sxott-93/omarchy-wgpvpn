@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""State store for the omarchy wg-VPN plugin. Unprivileged.
+
+Every subcommand prints one JSON document on stdout. On failure it prints
+{"error": "..."} and exits 1.
+
+  list
+  scan
+  add <config-file>
+  remove <name>
+  add-route <name> <cidr> [bypass:0|1]
+  remove-route <name> <cidr> [bypass:0|1]
+
+State lives in $XDG_DATA_HOME/omarchy-wgpvpn/vpns.json, deliberately outside
+the plugin directory: a write inside ~/.config/omarchy/plugins/ makes the
+shell hot-reload the plugin, which would tear down an open panel.
+"""
+import ipaddress
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+NAME_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,15}$")
+
+AWG_PARAMS = {
+    "jc", "jmin", "jmax",
+    "s1", "s2", "s3", "s4",
+    "h1", "h2", "h3", "h4",
+    "i1", "rekey",
+}
+
+SCAN_DIRS = [
+    Path(os.environ.get("HOME", str(Path.home()))) / ".config" / "amnezia",
+    Path(os.environ.get("HOME", str(Path.home()))) / ".config" / "wireguard",
+    Path("/etc/amnezia"),
+    Path("/etc/wireguard"),
+]
+
+
+def data_path():
+    xdg = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(xdg) / "omarchy-wgpvpn" / "vpns.json"
+
+
+VPNS_PATH = data_path()
+
+
+def fail(message):
+    print(json.dumps({"error": str(message)}))
+    sys.exit(1)
+
+
+def emit(obj):
+    print(json.dumps(obj))
+
+
+def load():
+    if not VPNS_PATH.is_file():
+        return {"vpns": []}
+    try:
+        data = json.loads(VPNS_PATH.read_text())
+    except (OSError, ValueError) as exc:
+        fail(f"cannot read {VPNS_PATH}: {exc}")
+    if not isinstance(data, dict) or not isinstance(data.get("vpns"), list):
+        fail(f"unexpected shape in {VPNS_PATH}")
+    return data
+
+
+def save(data):
+    VPNS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = VPNS_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    os.replace(tmp, VPNS_PATH)
+
+
+def detect_kind(path):
+    """'amneziawg' when the [Interface] carries AmneziaWG-specific params."""
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return "wireguard"
+    in_iface = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_iface = stripped[1:-1].strip().lower() == "interface"
+            continue
+        if in_iface and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip().lower()
+            if key in AWG_PARAMS:
+                return "amneziawg"
+    return "wireguard"
+
+
+def existing_names(data):
+    return {str(v.get("name", "")) for v in data["vpns"]}
+
+
+def vpn_by_name(data, name):
+    for vpn in data["vpns"]:
+        if vpn.get("name") == name:
+            return vpn
+    return None
+
+
+def check_cidr(raw):
+    raw = str(raw).strip()
+    try:
+        return str(ipaddress.ip_network(raw, strict=False))
+    except ValueError:
+        fail(f"invalid CIDR: {raw}")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        fail("missing subcommand")
+    cmd = args[0]
+    data = load()
+
+    if cmd == "list":
+        emit(data)
+        return
+
+    if cmd == "scan":
+        names = existing_names(data)
+        found = []
+        seen = set()
+        for directory in SCAN_DIRS:
+            if not directory.is_dir():
+                continue
+            for conf in sorted(directory.glob("*.conf")):
+                name = conf.stem
+                if not NAME_OK.match(name) or name in seen:
+                    continue
+                seen.add(name)
+                found.append({
+                    "name": name,
+                    "path": str(conf),
+                    "kind": detect_kind(conf),
+                    "configured": name in names,
+                })
+        emit({"found": found})
+        return
+
+    if cmd == "add" and len(args) == 2:
+        path = Path(args[1]).expanduser()
+        if not path.is_file():
+            fail(f"config file not found: {path}")
+        name = path.stem
+        if not NAME_OK.match(name):
+            fail(f"config file name {path.name} does not yield a usable interface name")
+        if name in existing_names(data):
+            fail(f"a VPN named {name} is already configured")
+        data["vpns"].append({
+            "name": name,
+            "path": str(path.resolve()),
+            "kind": detect_kind(path),
+            "routes": [],
+        })
+        save(data)
+        emit(data)
+        return
+
+    if cmd == "remove" and len(args) == 2:
+        name = args[1]
+        if vpn_by_name(data, name) is None:
+            fail(f"no VPN named {name}")
+        data["vpns"] = [v for v in data["vpns"] if v.get("name") != name]
+        save(data)
+        emit(data)
+        return
+
+    if cmd == "add-route" and len(args) in (3, 4):
+        name = args[1]
+        cidr = check_cidr(args[2])
+        bypass = len(args) == 4 and args[3] == "1"
+        vpn = vpn_by_name(data, name)
+        if vpn is None:
+            fail(f"no VPN named {name}")
+        if not isinstance(vpn.get("routes"), list):
+            vpn["routes"] = []
+        for route in vpn["routes"]:
+            if str(route.get("cidr")) == cidr:
+                fail(f"route {cidr} already exists on {name}")
+        vpn["routes"].append({"cidr": cidr, "bypass": bool(bypass)})
+        save(data)
+        emit(data)
+        return
+
+    if cmd == "remove-route" and len(args) in (3, 4):
+        name = args[1]
+        cidr = check_cidr(args[2])
+        vpn = vpn_by_name(data, name)
+        if vpn is None:
+            fail(f"no VPN named {name}")
+        before = vpn.get("routes") or []
+        after = [r for r in before if str(r.get("cidr")) != cidr]
+        if len(after) == len(before):
+            fail(f"no route {cidr} on {name}")
+        vpn["routes"] = after
+        save(data)
+        emit(data)
+        return
+
+    fail(f"unknown command: {' '.join(args)}")
+
+
+if __name__ == "__main__":
+    main()

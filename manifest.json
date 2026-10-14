@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "sxott.wgpvpn",
+  "name": "WG VPN",
+  "version": "0.1.0",
+  "author": "sxott",
+  "description": "Discover, configure, and toggle WireGuard and AmneziaWG VPNs, with per-VPN extra routes and LAN bypass.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "VPN",
+    "description": "Toggle WireGuard/AmneziaWG VPNs; manage their extra routes.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
