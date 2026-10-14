@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 """Root helper for the omarchy wg-VPN plugin. Invoked via pkexec.
 
-  vpnhelper <up|down> <vpns.json> <name>
+  vpnhelper <up|down> <vpns.json> <name> <quick-path>
 
-Brings the named VPN up or down with awg-quick, applying or removing the
-extra routes recorded for it. Routes the plugin applied are written to
+Brings the named VPN up or down with the *-quick binary the panel selected
+(awg-quick or wg-quick, detected on the user's machine), applying or
+removing the extra routes recorded for it. The binary must be an absolute
+path whose basename is one of the known quick tools — anything else is
+refused. Routes the plugin applied are written to
 /run/omarchy-wgpvpn/<name>.routes so `down` removes exactly what `up`
 added — including after a reboot, where no routes survive anyway.
 
 Exit status 0 on success; a human-readable message on stderr otherwise.
 """
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 RUN_DIR = Path("/run/omarchy-wgpvpn")
-AWG_QUICK = "/usr/bin/awg-quick"
+QUICK_BASENAMES = {"awg-quick", "wg-quick"}
 IP = "/usr/bin/ip"
 
 
@@ -121,7 +125,15 @@ def read_record(name):
     return applied
 
 
-def do_up(vpns_path, name):
+def check_quick(raw):
+    """Absolute path whose basename is a known quick tool, or refuse."""
+    quick = str(raw)
+    if not quick.startswith("/") or os.path.basename(quick) not in QUICK_BASENAMES:
+        sys.exit(f"refusing unrecognized quick binary: {quick}")
+    return quick
+
+
+def do_up(quick, vpns_path, name):
     data = load_vpns(vpns_path)
     vpn = vpn_entry(data, name)
     cfg = str(vpn.get("path", ""))
@@ -139,7 +151,7 @@ def do_up(vpns_path, name):
         bypass_dev = devices[0]
 
     if link_state(name) != "up":
-        sh([AWG_QUICK, "up", cfg])
+        sh([quick, "up", cfg])
 
     applied = applied_routes(vpn, bypass_dev)
     for cidr, dev in applied:
@@ -149,7 +161,7 @@ def do_up(vpns_path, name):
     print(f"{name} is up{extra}")
 
 
-def do_down(vpns_path, name):
+def do_down(quick, vpns_path, name):
     data = load_vpns(vpns_path)
     vpn = vpn_entry(data, name)
 
@@ -167,22 +179,23 @@ def do_down(vpns_path, name):
     except OSError:
         pass
 
-    proc = sh([AWG_QUICK, "down", str(vpn.get("path", ""))], check=False)
+    proc = sh([quick, "down", str(vpn.get("path", ""))], check=False)
     if proc is not None and proc.returncode != 0 and link_state(name) == "up":
         detail = (proc.stderr or proc.stdout).strip()
-        sys.exit(detail if detail else "awg-quick down failed")
+        sys.exit(detail if detail else "quick down failed")
     removed = f", {len(applied)} route(s) removed" if applied else ""
     print(f"{name} is down{removed}")
 
 
 def main():
-    if len(sys.argv) != 4:
-        sys.exit("usage: vpnhelper <up|down> <vpns.json> <name>")
-    cmd, vpns_path, name = sys.argv[1:4]
+    if len(sys.argv) != 5:
+        sys.exit("usage: vpnhelper <up|down> <vpns.json> <name> <quick-path>")
+    cmd, vpns_path, name, quick = sys.argv[1:5]
+    quick = check_quick(quick)
     if cmd == "up":
-        do_up(vpns_path, name)
+        do_up(quick, vpns_path, name)
     elif cmd == "down":
-        do_down(vpns_path, name)
+        do_down(quick, vpns_path, name)
     else:
         sys.exit(f"unknown command: {cmd}")
 

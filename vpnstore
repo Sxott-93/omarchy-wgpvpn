@@ -19,6 +19,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -96,6 +97,26 @@ def detect_kind(path):
     return "wireguard"
 
 
+def detect_tools():
+    """Installed *-quick binaries, resolved on the user's PATH.
+
+    Live system query, never persisted: the panel re-reads it on every
+    list/scan, so a freshly installed wireguard-tools/amneziawg-tools is
+    picked up without a restart. awg-quick handles both config kinds;
+    wg-quick handles plain WireGuard only.
+    """
+    return {
+        "awg-quick": shutil.which("awg-quick"),
+        "wg-quick": shutil.which("wg-quick"),
+    }
+
+
+def with_tools(data):
+    out = dict(data)
+    out["tools"] = detect_tools()
+    return out
+
+
 def existing_names(data):
     return {str(v.get("name", "")) for v in data["vpns"]}
 
@@ -123,7 +144,7 @@ def main():
     data = load()
 
     if cmd == "list":
-        emit(data)
+        emit(with_tools(data))
         return
 
     if cmd == "scan":
@@ -144,7 +165,7 @@ def main():
                     "kind": detect_kind(conf),
                     "configured": name in names,
                 })
-        emit({"found": found})
+        emit({"found": found, "tools": detect_tools()})
         return
 
     if cmd == "add" and len(args) == 2:
@@ -163,7 +184,7 @@ def main():
             "routes": [],
         })
         save(data)
-        emit(data)
+        emit(with_tools(data))
         return
 
     if cmd == "remove" and len(args) == 2:
@@ -172,7 +193,7 @@ def main():
             fail(f"no VPN named {name}")
         data["vpns"] = [v for v in data["vpns"] if v.get("name") != name]
         save(data)
-        emit(data)
+        emit(with_tools(data))
         return
 
     if cmd == "add-route" and len(args) in (3, 4):
@@ -189,7 +210,7 @@ def main():
                 fail(f"route {cidr} already exists on {name}")
         vpn["routes"].append({"cidr": cidr, "bypass": bool(bypass)})
         save(data)
-        emit(data)
+        emit(with_tools(data))
         return
 
     if cmd == "remove-route" and len(args) in (3, 4):
@@ -204,7 +225,7 @@ def main():
             fail(f"no route {cidr} on {name}")
         vpn["routes"] = after
         save(data)
-        emit(data)
+        emit(with_tools(data))
         return
 
     fail(f"unknown command: {' '.join(args)}")

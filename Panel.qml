@@ -28,6 +28,9 @@ Panel {
 
   property var vpns: []
   property var found: []
+  // Installed *-quick binaries, refreshed with every list/scan (first open
+  // and the scan-for-configs button): { "awg-quick": path|null, ... }.
+  property var tools: ({})
   property bool everScanned: false
   property var linkStatus: ({})
   property string busyName: ""
@@ -141,6 +144,14 @@ Panel {
   function toggleVpn(index) {
     var vpn = Array.isArray(root.vpns) ? root.vpns[index] : null
     if (!vpn || root.busyName !== "") return
+    var quick = Model.quickFor(vpn, root.tools)
+    if (quick === "") {
+      root.statusIsError = true
+      root.statusLine = vpn.name + ": " + (vpn.kind === "amneziawg"
+        ? "needs amneziawg-tools (awg-quick) installed"
+        : "needs wireguard-tools or amneziawg-tools installed")
+      return
+    }
     var wantOn = !Model.isVpnUp(root.linkStatus, vpn.name)
     root.busyName = vpn.name
     root.busyOn = wantOn
@@ -150,7 +161,7 @@ Panel {
     vpnProc.name = vpn.name
     vpnProc.wantOn = wantOn
     vpnProc.command = ["pkexec", root.storeDir + "/vpnhelper",
-                       wantOn ? "up" : "down", root.vpnsJson, vpn.name]
+                       wantOn ? "up" : "down", root.vpnsJson, vpn.name, quick]
     vpnProc.running = true
   }
 
@@ -183,15 +194,18 @@ Panel {
       }
       if (op === "list") {
         root.vpns = parsed && Array.isArray(parsed.vpns) ? parsed.vpns : []
+        root.tools = parsed && parsed.tools ? parsed.tools : ({})
         root.pollLinks()
         // First run, nothing configured: look for configs on disk.
         if (root.vpns.length === 0 && !root.everScanned)
           root.runStore(["scan"], "scan")
       } else if (op === "scan") {
         root.found = parsed && Array.isArray(parsed.found) ? parsed.found : []
+        root.tools = parsed && parsed.tools ? parsed.tools : ({})
         root.everScanned = true
       } else {
         root.vpns = parsed && Array.isArray(parsed.vpns) ? parsed.vpns : []
+        root.tools = parsed && parsed.tools ? parsed.tools : ({})
         if (op.indexOf("route:add") === 0) {
           root.routeBypass = false
           if (root._pendingRouteField) root._pendingRouteField.text = ""
@@ -472,6 +486,16 @@ Panel {
                     font.pixelSize: Style.font.caption
                     color: Util.alpha(Color.foreground, 0.55)
                   }
+
+                  // No installed binary can drive this VPN: say so on the row.
+                  Text {
+                    visible: vpnBlock.vpn && Model.quickFor(vpnBlock.vpn, root.tools) === ""
+                    text: vpnBlock.vpn && vpnBlock.vpn.kind === "amneziawg"
+                      ? "needs amneziawg-tools (awg-quick)"
+                      : "needs wireguard-tools or amneziawg-tools"
+                    font.pixelSize: Style.font.caption
+                    color: Util.alpha(Color.urgent, 0.9)
+                  }
                 }
 
                 Item { Layout.fillWidth: true }
@@ -520,6 +544,7 @@ Panel {
                   MouseArea {
                     anchors.fill: parent
                     enabled: !vpnBlock.busy
+                            && Model.quickFor(vpnBlock.vpn, root.tools) !== ""
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.toggleVpn(vpnBlock.index)
                   }

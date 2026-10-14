@@ -45,6 +45,18 @@ function isVpnUp(status, name) {
   return entry ? entry.up === true : false
 }
 
+// Full path of the *-quick binary that can drive this VPN, or "" when
+// nothing installed can. AmneziaWG configs need awg-quick; plain WireGuard
+// works with awg-quick (preferred) or wg-quick. `tools` comes from the
+// vpnstore list/scan output: { "awg-quick": path|null, "wg-quick": path|null }.
+function quickFor(vpn, tools) {
+  if (!vpn || !tools) return ""
+  var awg = tools["awg-quick"] || ""
+  var wg = tools["wg-quick"] || ""
+  if (vpn.kind === "amneziawg") return awg
+  return awg !== "" ? awg : wg
+}
+
 function vpnAddr(status, name) {
   var entry = status ? status[name] : null
   return entry ? String(entry.addr || "") : ""
