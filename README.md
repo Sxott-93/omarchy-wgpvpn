@@ -4,7 +4,7 @@ An Omarchy shell plugin: discovers WireGuard and AmneziaWG client configs,
 toggles each VPN up/down from the bar, and manages per-VPN extra routes
 (including LAN bypass routes).
 
-![The panel: VPN list with toggle, and the expanded route manager](preview.png)
+![The panel with an active VPN: full-tunnel badge, tunnel address, live traffic, and the route manager](preview.png)
 
 ## Install
 
