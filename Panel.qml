@@ -33,6 +33,8 @@ Panel {
   property var tools: ({})
   property bool everScanned: false
   property var linkStatus: ({})
+  // { name: { addr } } from `ip -j addr show` (link show omits it on AWG).
+  property var addrStatus: ({})
   property string busyName: ""
   property bool busyOn: false
   property string statusLine: ""
@@ -46,8 +48,23 @@ Panel {
   // blocked so typing (and Enter = add route) reaches the field.
   property bool _fieldEditing: false
 
-  // Icon tint: any configured VPN up. Polled unprivileged via barstatus.
-  property bool anyUp: false
+  // Icon tint: any configured VPN up. Derived from the polled link status,
+  // so the 30 s bar poll and the 5 s panel poll both keep it fresh.
+  readonly property bool anyUp: {
+    var list = Array.isArray(vpns) ? vpns : []
+    for (var i = 0; i < list.length; i++)
+      if (list[i] && Model.isVpnUp(linkStatus, String(list[i].name || "")))
+        return true
+    return false
+  }
+
+  // Device a generic (internet) packet exits through, per `ip route get`
+  // (honors policy routing). Drives the full-tunnel / LAN-bypass badge.
+  property string tunnelDev: ""
+  // Per-interface traffic rates, bytes/s: { name: { down, up} }.
+  property var netRates: ({})
+  // Previous net-stat sample, for the delta.
+  property var _prevNet: ({})
 
   // The bar slot sizes itself from this item's implicit size; the anchored
   // button alone contributes nothing, so take the button's (same as audio).
@@ -55,6 +72,12 @@ Panel {
   implicitHeight: button.implicitHeight
 
   // ------------------------------------------------------------ lifecycle
+
+  Component.onCompleted: {
+    // The bar tint needs the VPN list on a cold shell, before the panel is
+    // ever opened; the list handler kicks off the first link poll.
+    root.runStore(["list"], "list")
+  }
 
   function open(payloadJson) {
     root.controller.show()
@@ -66,15 +89,11 @@ Panel {
     if (storeProc.running) { storeProc.expectedStop = true; storeProc.running = false }
     if (vpnProc.running) { vpnProc.expectedStop = true; vpnProc.running = false }
     if (linkProc.running) { linkProc.expectedStop = true; linkProc.running = false }
+    if (addrProc.running) { addrProc.expectedStop = true; addrProc.running = false }
+    if (routeProc.running) { routeProc.expectedStop = true; routeProc.running = false }
+    if (netProc.running) { netProc.expectedStop = true; netProc.running = false }
     root.statusLine = ""
     root.statusIsError = false
-  }
-
-  function refreshBarStatus() {
-    if (statusProc.running) return
-    statusProc.expectedStop = false
-    statusProc.command = [root.storeDir + "/barstatus"]
-    statusProc.running = true
   }
 
   // ------------------------------------------------------------ store ops
@@ -174,6 +193,54 @@ Panel {
     linkProc.running = true
   }
 
+  function pollRoutes() {
+    if (routeProc.running) return
+    routeProc.expectedStop = false
+    routeProc.command = ["/usr/bin/ip", "-j", "route", "get", "8.8.8.8"]
+    routeProc.running = true
+  }
+
+  function pollAddrs() {
+    if (addrProc.running) return
+    addrProc.expectedStop = false
+    addrProc.command = ["/usr/bin/ip", "-j", "addr", "show"]
+    addrProc.running = true
+  }
+
+  function pollStatus() {
+    root.pollLinks()
+    root.pollRoutes()
+    root.pollAddrs()
+  }
+
+  // Sample /sys/class/net/<if>/statistics for every up VPN in one cat; the
+  // rate is the delta against the previous sample.
+  function pollNetStats() {
+    var names = []
+    var list = Array.isArray(vpns) ? vpns : []
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && Model.isVpnUp(linkStatus, String(list[i].name || "")))
+        names.push(String(list[i].name))
+    }
+    if (names.length === 0) {
+      if (Object.keys(root._prevNet).length > 0) {
+        root._prevNet = ({})
+        root.netRates = ({})
+      }
+      return
+    }
+    if (netProc.running) return
+    netProc.expectedStop = false
+    netProc.names = names.join(" ")
+    var files = []
+    for (var n = 0; n < names.length; n++) {
+      files.push("/sys/class/net/" + names[n] + "/statistics/rx_bytes")
+      files.push("/sys/class/net/" + names[n] + "/statistics/tx_bytes")
+    }
+    netProc.command = ["/bin/cat"].concat(files)
+    netProc.running = true
+  }
+
   // ------------------------------------------------------------ processes
 
   Process {
@@ -259,17 +326,69 @@ Panel {
     interval: 5000
     running: root.opened
     repeat: true
-    onTriggered: root.pollLinks()
+    onTriggered: root.pollStatus()
   }
 
   Process {
-    id: statusProc
+    id: routeProc
     property bool expectedStop: false
-    stdout: StdioCollector { id: statusOut; waitForEnd: true }
+    stdout: StdioCollector { id: routeOut; waitForEnd: true }
     onExited: {
-      if (statusProc.expectedStop) { statusProc.expectedStop = false; return }
-      root.anyUp = String(statusOut.text || "").trim() === "up"
+      if (routeProc.expectedStop) { routeProc.expectedStop = false; return }
+      root.tunnelDev = Model.tunnelDev(routeOut.text)
     }
+  }
+
+  Process {
+    id: addrProc
+    property bool expectedStop: false
+    stdout: StdioCollector { id: addrOut; waitForEnd: true }
+    onExited: {
+      if (addrProc.expectedStop) { addrProc.expectedStop = false; return }
+      root.addrStatus = Model.parseAddrStatus(addrOut.text, Model.vpnNames(root.vpns))
+    }
+  }
+
+  Process {
+    id: netProc
+    property bool expectedStop: false
+    property string names: ""
+    stdout: StdioCollector { id: netOut; waitForEnd: true }
+    onExited: function(code) {
+      if (netProc.expectedStop) { netProc.expectedStop = false; return }
+      var names = String(netProc.names).split(" ")
+      var lines = String(netOut.text || "").trim().split(/\r?\n/)
+      if (code !== 0 || lines.length !== names.length * 2) return
+      var now = new Date().getTime()
+      var cur = ({})
+      for (var i = 0; i < names.length; i++) {
+        var rx = parseFloat(lines[i * 2])
+        var tx = parseFloat(lines[i * 2 + 1])
+        if (isNaN(rx) || isNaN(tx)) return
+        cur[names[i]] = { rx: rx, tx: tx }
+      }
+      var prev = root._prevNet
+      var rates = ({})
+      for (var n in cur) {
+        var p = prev[n]
+        if (!p) continue
+        var dt = (now - p.t) / 1000
+        if (dt <= 0) continue
+        var down = Math.max(0, cur[n].rx - p.rx) / dt
+        var up = Math.max(0, cur[n].tx - p.tx) / dt
+        rates[n] = { down: down, up: up }
+      }
+      root._prevNet = cur
+      root.netRates = rates
+    }
+  }
+
+  Timer {
+    interval: 2000
+    running: root.opened
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.pollNetStats()
   }
 
   Timer {
@@ -277,7 +396,7 @@ Panel {
     running: true
     repeat: true
     triggeredOnStart: true
-    onTriggered: root.refreshBarStatus()
+    onTriggered: root.pollLinks()
   }
 
   // ------------------------------------------------------------ the button
@@ -300,9 +419,9 @@ Panel {
     }
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.MiddleButton) {
-        // Refresh the up/down state immediately instead of waiting for the
+        // Refresh the link status immediately instead of waiting for the
         // next 30 s tick.
-        root.refreshBarStatus()
+        root.pollStatus()
       } else {
         root.toggle()
       }
@@ -410,7 +529,16 @@ Panel {
               required property int index
               readonly property var vpn: Array.isArray(root.vpns) ? root.vpns[index] : null
               readonly property bool up: vpn ? Model.isVpnUp(root.linkStatus, vpn.name) : false
-              readonly property string addr: vpn ? Model.vpnAddr(root.linkStatus, vpn.name) : ""
+              readonly property string addr: vpn ? Model.vpnAddr(root.addrStatus, vpn.name) : ""
+              // Holds the machine's default route (full tunnel) vs LAN-out (bypass).
+              readonly property bool fullTunnel: up && vpn && root.tunnelDev === vpn.name
+              readonly property var showRouteBadge: up && root.tunnelDev !== ""
+              // "↓ 1.4 MB/s ↑ 210 KB/s" from the 2 s traffic sampling.
+              readonly property string rateLine: {
+                var r = vpn && root.netRates ? root.netRates[vpn.name] : null
+                if (!r) return ""
+                return "↓ " + Model.formatRate(r.down) + "   ↑ " + Model.formatRate(r.up)
+              }
               readonly property bool busy: vpn ? root.busyName === vpn.name : false
               readonly property bool expanded: root.expanded === index
 
@@ -478,11 +606,40 @@ Panel {
                         color: Color.foreground
                       }
                     }
+
+                    // Where this up VPN's traffic is going: its interface holds
+                    // the default route (full tunnel) or the LAN NIC does.
+                    Rectangle {
+                      visible: vpnBlock.showRouteBadge
+                      height: Style.space(11)
+                      width: routeBadgeText.implicitWidth + Style.space(12)
+                      radius: Style.space(3)
+                      color: vpnBlock.fullTunnel
+                        ? Util.alpha(Color.accent, 0.16)
+                        : Util.alpha(Color.foreground, 0.1)
+                      Layout.alignment: Qt.AlignVCenter
+                      Text {
+                        id: routeBadgeText
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        anchors.leftMargin: Style.space(6)
+                        text: vpnBlock.fullTunnel ? "full tunnel" : "LAN bypass"
+                        font.pixelSize: Style.font.caption
+                        color: vpnBlock.fullTunnel ? Color.accent : Util.alpha(Color.foreground, 0.7)
+                      }
+                    }
                   }
 
                   Text {
                     visible: vpnBlock.addr !== ""
                     text: vpnBlock.addr
+                    font.pixelSize: Style.font.caption
+                    color: Util.alpha(Color.foreground, 0.55)
+                  }
+
+                  Text {
+                    visible: vpnBlock.up && vpnBlock.rateLine !== ""
+                    text: vpnBlock.rateLine
                     font.pixelSize: Style.font.caption
                     color: Util.alpha(Color.foreground, 0.55)
                   }

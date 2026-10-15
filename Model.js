@@ -32,6 +32,48 @@ function parseLinkStatus(text, names) {
   return out
 }
 
+// `ip -j route get 8.8.8.8` -> the device a generic (internet) packet would
+// actually exit through, honoring policy routing (which wg-quick/awg-quick
+// sets up). ip -j wraps the single result in a one-element list. "" when
+// unresolvable.
+function tunnelDev(text) {
+  var r = safeParse(text, null)
+  if (Array.isArray(r) && r.length > 0) r = r[0]
+  if (r && r.dev) return String(r.dev)
+  return ""
+}
+
+// `ip -j addr show` -> { name: { addr } } for the given interface names.
+// (Unlike `ip -j link show`, which on some drivers — notably the AmneziaWG
+// kernel module — omits addr_info entirely.)
+function parseAddrStatus(text, names) {
+  var out = ({})
+  var addrs = safeParse(text, [])
+  if (!Array.isArray(addrs)) addrs = []
+  for (var i = 0; i < addrs.length; i++) {
+    var a = addrs[i] || {}
+    var name = String(a.ifname || "")
+    if (names.indexOf(name) === -1) continue
+    var infos = a.addr_info || []
+    for (var k = 0; k < infos.length; k++) {
+      if (infos[k] && infos[k].family === "inet") {
+        out[name] = { addr: String(infos[k].local || "") }
+        break
+      }
+    }
+  }
+  return out
+}
+
+// Bytes per second -> "1.4 MB/s" (decimal units, network convention).
+function formatRate(bps) {
+  var v = Number(bps) || 0
+  if (v < 1000) return Math.round(v) + " B/s"
+  if (v < 1000000) return (v / 1000).toFixed(1) + " KB/s"
+  if (v < 1000000000) return (v / 1000000).toFixed(1) + " MB/s"
+  return (v / 1000000000).toFixed(2) + " GB/s"
+}
+
 function vpnNames(vpns) {
   var out = []
   var list = Array.isArray(vpns) ? vpns : []
