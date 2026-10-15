@@ -7,7 +7,7 @@ toggles each VPN up/down from the bar, and manages per-VPN extra routes
 ## Install
 
 ```sh
-omarchy plugin add https://github.com/<you>/<repo>.git --enable
+omarchy plugin add https://github.com/Sxott-93/omarchy-wgpvpn.git --enable
 ```
 
 ## Requirements
