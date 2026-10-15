@@ -365,15 +365,15 @@ Panel {
         var rx = parseFloat(lines[i * 2])
         var tx = parseFloat(lines[i * 2 + 1])
         if (isNaN(rx) || isNaN(tx)) return
-        cur[names[i]] = { rx: rx, tx: tx }
+        cur[names[i]] = { rx: rx, tx: tx, t: now }
       }
       var prev = root._prevNet
       var rates = ({})
       for (var n in cur) {
         var p = prev[n]
-        if (!p) continue
+        if (!p || !p.t) continue
         var dt = (now - p.t) / 1000
-        if (dt <= 0) continue
+        if (!(dt > 0)) continue
         var down = Math.max(0, cur[n].rx - p.rx) / dt
         var up = Math.max(0, cur[n].tx - p.tx) / dt
         rates[n] = { down: down, up: up }
